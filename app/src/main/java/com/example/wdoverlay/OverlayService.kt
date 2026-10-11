@@ -22,6 +22,9 @@ class OverlayService : Service() {
     private var lastToggle = 0L
     private val main = Handler(Looper.getMainLooper())
 
+    // The panel hides itself so it can never trap you in a game.
+    private val autoHide = Runnable { panel?.visibility = View.GONE }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -38,16 +41,16 @@ class OverlayService : Service() {
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.START; x = 40; y = 200 }
         makeDraggable(view, lp)
+        view.visibility = View.GONE          // always start hidden
         wm.addView(view, lp)
         panel = view
 
         val key = getSharedPreferences("wd", MODE_PRIVATE).getString("toggleKey", "BTN_X") ?: "BTN_X"
         if (AdbManager.get(this).isConnected) {
-            view.visibility = View.GONE
             watcher = InputWatcher(this).also { w ->
                 w.start { k ->
                     if (k == key) {
@@ -65,10 +68,24 @@ class OverlayService : Service() {
         }
     }
 
+    private fun showPanel() {
+        panel?.visibility = View.VISIBLE
+        kick()
+    }
+
+    private fun hidePanel() {
+        main.removeCallbacks(autoHide)
+        panel?.visibility = View.GONE
+    }
+
     private fun togglePanel() {
-        panel?.let {
-            it.visibility = if (it.visibility == View.VISIBLE) View.GONE else View.VISIBLE
-        }
+        if (panel?.visibility == View.VISIBLE) hidePanel() else showPanel()
+    }
+
+    /** Restarts the auto-hide countdown (8 seconds). */
+    private fun kick() {
+        main.removeCallbacks(autoHide)
+        main.postDelayed(autoHide, AUTO_HIDE_MS)
     }
 
     private fun buildPanel(): View {
@@ -86,7 +103,7 @@ class OverlayService : Service() {
         }
         fun btn(label: String, action: () -> String) = Button(this).apply {
             text = label; textSize = 12f; Mono.button(this, d)
-            setOnClickListener { Adb.run(action) { out.text = it } }
+            setOnClickListener { kick(); Adb.run(action) { out.text = it } }
         }
 
         // Two-tap confirm: first tap arms the button, second tap (within 3s) runs it.
@@ -94,6 +111,7 @@ class OverlayService : Service() {
             text = label; textSize = 12f; Mono.button(this, d)
             var armed = false
             setOnClickListener {
+                kick()
                 if (!armed) {
                     armed = true
                     text = "Tap again to confirm"
@@ -136,7 +154,7 @@ class OverlayService : Service() {
         })
         box.addView(Button(this).apply {
             text = "Hide panel"; textSize = 12f; Mono.button(this, d)
-            setOnClickListener { togglePanel() }
+            setOnClickListener { hidePanel() }
         })
         box.addView(btn("Close overlay") { stopSelf(); "" })
         box.addView(out)
@@ -147,7 +165,10 @@ class OverlayService : Service() {
         var startX = 0; var startY = 0; var touchX = 0f; var touchY = 0f
         v.setOnTouchListener { _, e ->
             when (e.action) {
-                MotionEvent.ACTION_DOWN -> { startX = lp.x; startY = lp.y; touchX = e.rawX; touchY = e.rawY; true }
+                MotionEvent.ACTION_DOWN -> {
+                    kick()
+                    startX = lp.x; startY = lp.y; touchX = e.rawX; touchY = e.rawY; true
+                }
                 MotionEvent.ACTION_MOVE -> {
                     lp.x = startX + (e.rawX - touchX).toInt()
                     lp.y = startY + (e.rawY - touchY).toInt()
@@ -159,8 +180,13 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
+        main.removeCallbacks(autoHide)
         watcher?.stop()
         panel?.let { wm.removeView(it) }
         super.onDestroy()
+    }
+
+    companion object {
+        private const val AUTO_HIDE_MS = 8000L
     }
 }
